@@ -1,2 +1,7 @@
 yt-dlp>=2023.9.24
 pytube>=15.0.0
+
+# For YouTube Data API usage:
+google-api-python-client>=2.94.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.0.0
