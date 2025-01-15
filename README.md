@@ -17,8 +17,19 @@ source venv/bin/activate  # or venv\Scripts\activate on Windows
 pip install -r requirements.txt
 
 # 2) Put your .env with YOUTUBE_API_KEY and PROXIES
+NODE_ENV=
+YOUTUBE_API_KEY=
+PROXIES=
 
 # 3) Adjust data/input_links.json to your desired list of URLs
+E.G:
+{
+    "urls": [
+      "https://www.youtube.com/@muni_gurume",
+      "https://www.youtube.com/@Hasida",
+      "https://www.youtube.com/@tamo__tyan"
+    ]
+}
 
 # 4) Run main.py
 python main.py \
