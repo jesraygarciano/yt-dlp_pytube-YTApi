@@ -12,16 +12,20 @@ This project demonstrates how to combine:
 **Clone** or copy this repo structure.
 
 # 1) Create venv & install dependencies
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -r requirements.txt
+```bash
+$ python -m venv venv
+$ source venv/bin/activate  # or venv\Scripts\activate on Windows
+$ pip install -r requirements.txt
+```
 
 # 2) Put your .env with YOUTUBE_API_KEY and PROXIES
+
 NODE_ENV=
 YOUTUBE_API_KEY=
 PROXIES=
 
 # 3) Adjust data/input_links.json to your desired list of URLs
+
 E.G:
 {
     "urls": [
@@ -32,10 +36,12 @@ E.G:
 }
 
 # 4) Run main.py
+```bash
 python main.py \
   --use-api \
   --dump-json data/output/merged.json \
   --dump-csv data/output/merged.csv
+```
 
 # That will:
 #  - Use YouTube Data API for channel links,
