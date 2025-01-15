@@ -1,7 +1,12 @@
+# Official YouTube Data API / Google API client
+google-api-python-client>=2.95.0
+
+# For auth (if you use service accounts or OAuth)
+google-auth>=2.23.0
+google-auth-oauthlib>=1.0.0
+
+# For scraping fallback
 yt-dlp>=2023.9.24
 pytube>=15.0.0
 
-# For YouTube Data API usage:
-google-api-python-client>=2.94.0
-google-auth-httplib2>=0.1.0
-google-auth-oauthlib>=1.0.0
+

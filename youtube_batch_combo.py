@@ -1,208 +1,168 @@
 #!/usr/bin/env python3
-"""
-youtube_batch_combo.py
-
-Demonstration of batch processing for two lists:
-  1) accounts = [[channelUrl, countryName], ...]
-  2) urls = [url1, url2, ...]
-
-Uses:
-  - yt-dlp for multi-video scraping (channels, playlists).
-  - pytube for single-video scraping.
-
-To run:
-  python youtube_batch_combo.py
-"""
-
-import re
-import sys
 import os
-import random
 import json
+import time
+import requests
+from pathlib import Path
+from typing import Optional, List, Dict
 
-from yt_dlp import YoutubeDL
-from pytube import YouTube
+# Imports for official YouTube Data API
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
+# If you want to do local scraping fallback
+import subprocess
 
-# ==========================
-# 1) Hard-coded data sets
-# ==========================
+# If you want single-video quick check
+try:
+    from pytube import YouTube
+    PYTUBE_AVAILABLE = True
+except ImportError:
+    PYTUBE_AVAILABLE = False
 
-accounts = [
-    ["https://www.youtube.com/channel/UCVjlpEjEY9GpksqbEesJnNA", "アメリカ合衆国"],
-    ["https://www.youtube.com/channel/UCpdvoICPfIeID9hNbB_9xXw", "不明"],
-    ["https://www.youtube.com/channel/UCtdKiwN9vw961uho0lre4_A", "サウジアラビア"],
-    ["https://www.youtube.com/channel/UCJK3VbSGg_3IHKtNIauIQTw", "不明"],
-    ["https://www.youtube.com/channel/UC3jOiUbvgAEovuVU0uFVB4Q", "不明"],
-    ["https://www.youtube.com/channel/UCERT7pnmRJdyxxtiar0B4dQ", "日本"],
-    ["https://www.youtube.com/channel/UCy_peWgMbPYAx-Jh6cKKGYQ", "大韓民国"],
-    ["https://www.youtube.com/channel/UCDjoi87PKTNPPTTA234g3Dg", "大韓民国"],
-]
+#########################
+# Configure your API key or environment variable
+#########################
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "<YOUR_API_KEY_HERE>")
 
-urls = [
-    "https://www.youtube.com/@muni_gurume",
-    "https://www.youtube.com/@Hasida",
-    "https://www.youtube.com/@tamo__tyan",
-    "https://www.youtube.com/@harapeko_Japan",
-    "https://www.youtube.com/@shiyago",
-    "https://www.youtube.com/@%E9%81%A0%E8%97%A4%E3%82%8A%E3%82%87%E3%81%86-m9s",
-    "https://www.youtube.com/@%E3%82%B8%E3%83%A3%E3%82%AB%E3%83%AB%E3%82%BFB%E7%B4%9A%E3%82%B0%E3%83%AB%E3%83%A1%E3%82%AC%E3%82%A4%E3%83%89-n4z",
-    "https://www.youtube.com/@gourmet_nikki",
-    "https://www.youtube.com/@agedashi_gurume",
-    "https://www.youtube.com/@cikarang-meshi",
-]
+DATA_DIR = Path("data")
+ETAG_CACHE_FILE = DATA_DIR / "etag_cache.json"
 
-
-# ==========================
-# 2) Helper logic
-# ==========================
-
-def is_single_video(url: str) -> bool:
+def load_etag_cache() -> Dict[str, str]:
     """
-    Heuristic to decide if `url` is likely a single video or not.
-    If 'list=' or '/playlist' or '/channel/' is found => multi-video => yt-dlp.
-    If 'watch?v=' or 'youtu.be/' => single => pytube.
-    Otherwise guess by partial patterns (refine as needed).
+    Load a JSON that maps channelId -> eTag.
+    This helps us avoid re-fetching the entire video list if eTag is unchanged.
     """
-    if re.search(r"(list=|/playlist|/channel/)", url):
-        return False
-    if ("watch?v=" in url) or ("youtu.be/" in url):
-        return True
-    return False
+    if not ETAG_CACHE_FILE.exists():
+        return {}
+    with open(ETAG_CACHE_FILE, "r", encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
 
+def save_etag_cache(etag_map: Dict[str, str]):
+    with open(ETAG_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(etag_map, f, indent=2)
 
-def scrape_with_yt_dlp(url: str):
+def get_channel_uploads_via_api(channel_id: str) -> List[Dict]:
     """
-    Use yt-dlp to fetch metadata from channel/playlist or multi-video links.
-    Returns a dictionary containing metadata.
+    Example: use the YouTube Data API to get the channel's latest uploads with eTag-based caching.
+    Return a list of video metadata (IDs, titles, etc.).
     """
-    print(f"\n[yt-dlp] Scraping metadata for: {url}")
-    ydl_opts = {
-        'skip_download': True,
-        'ignoreerrors': True,
-        'quiet': True,  # set to False if you want more debug logs
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info
+    # Initialize client
+    youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
+    # Load cached eTags
+    etag_map = load_etag_cache()
+    prev_etag = etag_map.get(channel_id)
 
-def scrape_single_video_with_pytube(url: str):
-    """
-    Use pytube to fetch single video metadata.
-    Returns a dictionary of essential data.
-    """
-    print(f"\n[pytube] Scraping single-video metadata for: {url}")
-    yt = YouTube(url)
-    data = {
-        "title": yt.title,
-        "author": yt.author,
-        "views": yt.views,
-        "length": yt.length,
-        "publish_date": yt.publish_date.isoformat() if yt.publish_date else None,
-        "description": yt.description,
-        "channel_url": f"https://www.youtube.com/channel/{yt.channel_id}" if yt.channel_id else None,
-    }
-    return data
+    # We can pass If-None-Match header to avoid usage if eTag hasn't changed
+    # googleapiclient doesn't provide a direct param for that, so we can use _requestBuilder
+    # or we can just do a manual request. For brevity, let's do a manual request using requests lib:
+    url = (
+        "https://www.googleapis.com/youtube/v3/search"
+        "?part=snippet"
+        f"&channelId={channel_id}"
+        "&maxResults=10"
+        "&order=date"
+        f"&key={YOUTUBE_API_KEY}"
+    )
+    headers = {}
+    if prev_etag:
+        headers["If-None-Match"] = prev_etag
 
+    resp = requests.get(url, headers=headers)
 
-def print_yt_dlp_results(info: dict, extra_label: str = ""):
+    # If status code is 304, it means Nothing changed => no new data => we can skip
+    if resp.status_code == 304:
+        print(f"[API] Channel {channel_id}: eTag unchanged. No new data.")
+        return []
+
+    if resp.status_code != 200:
+        print(f"[API] Error fetching channel info: {resp.status_code}, {resp.text}")
+        return []
+
+    # If OK, parse JSON
+    data = resp.json()
+    new_etag = resp.headers.get("ETag")
+    if new_etag:
+        etag_map[channel_id] = new_etag
+        save_etag_cache(etag_map)
+
+    items = data.get("items", [])
+    # Build a minimal list of video metadata
+    videos = []
+    for item in items:
+        vid_id = item.get("id", {}).get("videoId")
+        if not vid_id:
+            # Possibly a channel or playlist result
+            continue
+        snippet = item.get("snippet", {})
+        videos.append({
+            "videoId": vid_id,
+            "title": snippet.get("title"),
+            "publishedAt": snippet.get("publishedAt"),
+            "description": snippet.get("description"),
+            "channelTitle": snippet.get("channelTitle"),
+        })
+    return videos
+
+def fallback_scrape_with_ytdlp(url: str, output_dir: str):
     """
-    Print relevant metadata from yt-dlp's dictionary results.
+    Use yt-dlp to get .info.json if you want more details or if the Data API is insufficient.
     """
-    if not info:
-        print("No metadata found.")
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    command = [
+        "yt-dlp",
+        "--skip-download",
+        "--write-info-json",
+        "--ignore-errors",
+        "--output", f"{output_dir}/%(title)s [%(id)s].%(ext)s",
+        url
+    ]
+    print(f"[yt-dlp] Running: {' '.join(command)}")
+    subprocess.run(command, check=False)
+
+def demo_single_video_pytube(video_url: str):
+    """
+    If we just need a quick single-video check, we can use pytube (optional).
+    """
+    if not PYTUBE_AVAILABLE:
+        print("pytube not installed. Skipping.")
         return
+    yt = YouTube(video_url)
+    print(f"[pytube] Title: {yt.title}")
+    print(f"[pytube] Channel URL: {yt.channel_url}")
+    print(f"[pytube] Channel ID: {yt.channel_id}")
+    print(f"[pytube] Description: {yt.description[:80]}...")
+    print(f"[pytube] Publish Date: {yt.publish_date}")
 
-    # If multi-video, there may be an 'entries' array:
-    if 'entries' in info and info['entries']:
-        print(f"\n=== MULTI-VIDEO METADATA ({extra_label}) ===")
-        main_title = info.get('title') or "Unknown Playlist/Channel"
-        print(f"Collection Title: {main_title}")
-        print(f"Video Count: {len(info['entries'])}")
-
-        # Print short data for each entry
-        for i, entry in enumerate(info['entries'], start=1):
-            if not entry:
-                continue
-            print(f"\n[{i}] Title: {entry.get('title')}")
-            print(f"   Uploader:    {entry.get('uploader')}")
-            print(f"   Duration(s): {entry.get('duration')}")
-            print(f"   ViewCount:   {entry.get('view_count')}")
-
+def example_usage():
+    """
+    Example usage to show how you might tie everything together in one function.
+    1. For certain channels, use YouTube Data API with eTag to get new videos.
+    2. For each new video, do fallback scraping with yt-dlp if desired.
+    3. For single direct links, maybe do pytube or also yt-dlp.
+    """
+    # Suppose we have a channel
+    channel_id = "UCtdKiwN9vw961uho0lre4_A"
+    new_uploads = get_channel_uploads_via_api(channel_id)
+    if not new_uploads:
+        print("No new uploads or eTag unchanged. Skipping.")
     else:
-        # Single entry from yt-dlp
-        print(f"\n=== SINGLE VIDEO METADATA ({extra_label}, yt-dlp) ===")
-        print(f"Title:       {info.get('title')}")
-        print(f"Uploader:    {info.get('uploader')}")
-        print(f"Duration(s): {info.get('duration')}")
-        print(f"ViewCount:   {info.get('view_count')}")
+        print(f"New uploads found for channel {channel_id}: {len(new_uploads)}")
+        # Possibly run each through yt-dlp or store in DB
+        for vid in new_uploads:
+            video_url = f"https://www.youtube.com/watch?v={vid['videoId']}"
+            fallback_scrape_with_ytdlp(video_url, "data/output")
 
-
-def print_pytube_results(data: dict, extra_label: str = ""):
-    """
-    Print the single-video metadata from pytube's dictionary.
-    """
-    print(f"\n=== SINGLE VIDEO METADATA ({extra_label}, pytube) ===")
-    print(f"Title:         {data.get('title')}")
-    print(f"Author:        {data.get('author')}")
-    print(f"Views:         {data.get('views')}")
-    print(f"Length(s):     {data.get('length')}")
-    print(f"Publish Date:  {data.get('publish_date')}")
-    print(f"Channel URL:   {data.get('channel_url')}")
-    desc = data.get('description') or ''
-    print(f"Description:   {desc[:80]}...")
-
-
-def process_entry(url: str, country_name: str = ""):
-    """
-    Decide single vs. multi approach. 
-    If single => pytube, else => yt-dlp.
-    Print results plus any country info if relevant.
-    """
-    # 1) Check single vs multiple
-    single = is_single_video(url)
-
-    # 2) If single => pytube
-    if single:
-        metadata = scrape_single_video_with_pytube(url)
-        print_pytube_results(metadata, extra_label=country_name or "NoCountry")
-    else:
-        # multi => channel or playlist => use yt-dlp
-        info = scrape_with_yt_dlp(url)
-        print_yt_dlp_results(info, extra_label=country_name or "NoCountry")
-
-
-# ==========================
-# 3) Main "batch" logic
-# ==========================
-
-def process_accounts_batch():
-    """
-    This simulates your 'insert-youtube-accounts-with-company' style, 
-    where we have [[channelUrl, countryName], ...].
-    """
-    print("\n========== BATCH: ACCOUNTS WITH COUNTRY ===========\n")
-    for [url, country_name] in accounts:
-        process_entry(url, country_name)
-
-
-def process_urls_batch():
-    """
-    This simulates your 'insert-youtube-accounts' style, 
-    where we have a plain list of URLs for channels or videos.
-    """
-    print("\n========== BATCH: PLAIN URLS ===========\n")
-    for url in urls:
-        process_entry(url)
-
-
-def main():
-    # 1) Process the "accounts" batch
-    process_accounts_batch()
-    # 2) Process the "urls" batch
-    process_urls_batch()
-
+    # Single link case
+    single_vid = "https://www.youtube.com/watch?v=5wQ9nAlO12E"
+    print(f"\nUsing pytube on single video: {single_vid}")
+    demo_single_video_pytube(single_vid)
+    print("Done example usage.")
 
 if __name__ == "__main__":
-    main()
+    # For demonstration, just call example_usage
+    example_usage()
