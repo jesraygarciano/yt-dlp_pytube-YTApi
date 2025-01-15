@@ -24,6 +24,7 @@ import re
 import json
 import argparse
 import requests
+import sys
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -155,11 +156,13 @@ def fetch_channel_videos_api(channel_id: str, etags: Dict[str, str]) -> List[Dic
 
 def run_yt_dlp_metadata_only(url: str, output_dir: str):
     """
-    Use yt-dlp to fetch metadata without downloading video.
+    Use yt-dlp to fetch metadata without downloading video,
+    calling it via `python -m yt_dlp` for cross-platform reliability.
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     cmd = [
-        "yt-dlp",
+        sys.executable,     # e.g. python.exe
+        "-m", "yt_dlp",
         "--skip-download",
         "--write-info-json",
         "--ignore-errors",
@@ -168,6 +171,7 @@ def run_yt_dlp_metadata_only(url: str, output_dir: str):
     ]
     print(f"[yt-dlp] Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=False)
+
 
 def fetch_single_video_pytube(url: str) -> Dict[str, Any]:
     """
