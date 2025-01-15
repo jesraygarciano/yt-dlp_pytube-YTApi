@@ -4,33 +4,36 @@ from typing import List, Dict
 
 def parse_and_save_info_to_csv(info_list: List[Dict], out_csv: str):
     """
-    Takes a list of raw JSON data from yt-dlp .info.json
-    or from the Data API/Pytube results
-    and writes a structured CSV.
+    Takes a list of video/item dictionaries and writes them to a CSV.
+    Each dict might come from YouTube Data API, yt-dlp, or Pytube.
     """
     fieldnames = [
-        "video_id",
+        "videoId",
         "title",
-        "channel_id",
+        "channelId",
+        "channelTitle",
         "duration",
-        "view_count",
-        "like_count",
-        "webpage_url",
-        "description"
+        "viewCount",
+        "likeCount",
+        "publishedAt",
+        "description",
+        "source",
     ]
     with open(out_csv, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for item in info_list:
             row = {
-                "video_id": item.get("videoId") or item.get("id") or "",
+                "videoId": item.get("videoId", ""),
                 "title": item.get("title", ""),
-                "channel_id": item.get("channel_id", "") or item.get("channelId", ""),
-                "duration": item.get("duration", ""),
-                "view_count": item.get("view_count", ""),
-                "like_count": item.get("like_count", ""),
-                "webpage_url": item.get("webpage_url", ""),
-                "description": (item.get("description", "") or "")[:200]
+                "channelId": item.get("channelId", ""),
+                "channelTitle": item.get("channelTitle", ""),
+                "duration": str(item.get("duration", "")),
+                "viewCount": str(item.get("viewCount", "")),
+                "likeCount": str(item.get("likeCount", "")),
+                "publishedAt": item.get("publishedAt", ""),
+                "description": (item.get("description") or "")[:200],
+                "source": item.get("source", ""),
             }
             writer.writerow(row)
-    print(f"Saved CSV: {out_csv}")
+    print(f"[parse_metadata] CSV saved to {out_csv}")

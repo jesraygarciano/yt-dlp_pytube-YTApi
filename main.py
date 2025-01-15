@@ -2,10 +2,11 @@
 """
 main.py
 
-Combines:
-  - YouTube Data API (for channel listing, ETag caching)
-  - yt-dlp (for deeper multi-video scraping if needed)
-  - pytube (for single-video quick metadata)
+- Loads YOUTUBE_API_KEY from .env via python-dotenv
+- Uses the YouTube Data API for channel links with eTag caching (skip if no changes).
+- Falls back to yt-dlp if needed or if channel ID can't be parsed or if user doesn't use the API.
+- Uses pytube for single-video quick fetching, if installed.
+- Then optionally merges all metadata into a single JSON or CSV via parse_metadata.
 
 Directory structure:
   ./data/
@@ -15,177 +16,149 @@ Directory structure:
     parse_metadata.py
   ./
     main.py
-    youtube_batch_combo.py
     requirements.txt
 """
 
 import os
-import sys
+import re
 import json
 import argparse
+import requests
 import subprocess
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 
-from typing import Optional, Dict, Any
-import re
+# For .env loading:
+from dotenv import load_dotenv
 
-# Attempt to load optional libraries for each approach
+# For official YouTube Data API
 try:
     from googleapiclient.discovery import build
 except ImportError:
     build = None
 
+# For single-video usage
 try:
     from pytube import YouTube
     PYTUBE_AVAILABLE = True
 except ImportError:
     PYTUBE_AVAILABLE = False
 
-########################################
-# 1) HELPER: SINGLE VS MULTI DETECTION #
-########################################
+#######################
+# ENV/CONFIG LOADING
+#######################
+load_dotenv()  # load variables from .env
+YT_API_KEYS = os.getenv("YOUTUBE_API_KEY", "")  # could be comma-separated
 
-def is_single_video(url: str) -> bool:
+# For demonstration, we'll just pick the first key if comma-separated
+if "," in YT_API_KEYS:
+    # e.g. "AIza...,..."
+    YT_API_KEY = YT_API_KEYS.split(",")[0].strip()
+else:
+    YT_API_KEY = YT_API_KEYS.strip()
+
+DATA_DIR = Path("data")
+ETAG_JSON_PATH = DATA_DIR / "channel_etags.json"
+
+def load_etag_cache() -> Dict[str, str]:
     """
-    Heuristic to decide if `url` is likely a single video vs. channel/playlist.
-    We'll do a simple check:
-      - If "watch?v=" or "youtu.be/" => single
-      - If "/channel/" or "list=" or "playlist" => multi
-      - If "/@something" => often a channel handle => treat as channel
-    You can refine as needed.
+    Load a JSON that maps channelId-> eTag to skip re-fetching if nothing changed.
     """
-    # Single
-    if ("watch?v=" in url) or ("youtu.be/" in url):
-        return True
-
-    # Multi
-    if ("/channel/" in url) or ("list=" in url) or ("/playlist" in url):
-        return False
-    
-    # Handles (e.g. https://www.youtube.com/@somechannel) we treat as multi (channel).
-    if "/@" in url:
-        return False
-
-    # Default guess: multi
-    return False
-
-
-########################################
-# 2) YOUTUBE DATA API LOGIC (with ETag)
-########################################
-
-def load_api_key() -> Optional[str]:
-    """
-    In a real environment, you might load from env var or a config file.
-    For demonstration, we look for an environment variable YT_API_KEY.
-    """
-    return os.environ.get("YT_API_KEY", None)
-
-def load_etags_cache(cache_path: str = "data/channel_etags.json") -> Dict[str, str]:
-    """
-    Load the known { channelId: eTag } from local JSON, if any.
-    """
+    if not ETAG_JSON_PATH.exists():
+        return {}
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
+        with open(ETAG_JSON_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except:
         return {}
 
-def save_etags_cache(etags: Dict[str, str], cache_path: str = "data/channel_etags.json"):
-    Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(cache_path, "w", encoding="utf-8") as f:
+def save_etag_cache(etags: Dict[str, str]):
+    ETAG_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(ETAG_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(etags, f, indent=2)
-    print(f"ETag cache updated at {cache_path}")
-
-def fetch_channel_videos_youtube_api(channel_id: str, api_key: str, etags_cache: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Demonstration: Using YouTube Data API to get the channel's uploads or metadata,
-    while leveraging ETag to skip if unchanged.
-
-    If the ETag matches what's in our cache => we might skip or short-circuit.
-    Here we do a search() for the channel's 50 latest videos (as an example).
-    Real usage: you might do pagination or a playlistItems approach.
-
-    Returns a dictionary:
-      {
-         'channelId': str,
-         'etag_used': str,
-         'etag_new': str or None,
-         'videos': [ {videoId, title, ...}, ... ],
-         'unchanged': True/False,
-      }
-    """
-    if build is None:
-        print("googleapiclient is not installed. Please install or skip.")
-        return {"channelId": channel_id, "videos": [], "unchanged": False}
-
-    youtube = build("youtube", "v3", developerKey=api_key)
-
-    # Attempt to pass the known eTag to skip if not changed:
-    # The python googleapiclient library does not provide a direct "If-None-Match" param,
-    # so we must do a raw http call or a workaround. For demonstration, we’ll just do a normal request:
-    # If you want advanced usage with eTag, you'd intercept the request's http headers or use a
-    # lower-level approach with google-auth-httplib2. We'll do a minimal approach here.
-
-    # Step 1) fetch the channel's "uploads" using 'search.list' or 'channels.list' + 'playlistItems.list'.
-    # We'll do a simplified approach:
-    resp = (
-        youtube.search()
-        .list(part="snippet", channelId=channel_id, maxResults=50, order="date")
-        .execute()
-    )
-
-    new_etag = resp.get("etag")
-    old_etag = etags_cache.get(channel_id)
-
-    if new_etag and old_etag and new_etag == old_etag:
-        # The data is unchanged
-        return {
-            "channelId": channel_id,
-            "etag_used": old_etag,
-            "etag_new": None,
-            "videos": [],
-            "unchanged": True,
-        }
-
-    # Otherwise parse out the items => store them
-    videos_info = []
-    items = resp.get("items", [])
-    for it in items:
-        if it["id"]["kind"] == "youtube#video":
-            vid_id = it["id"]["videoId"]
-            snippet = it["snippet"]
-            videos_info.append({
-                "videoId": vid_id,
-                "publishedAt": snippet.get("publishedAt"),
-                "channelId": snippet.get("channelId"),
-                "title": snippet.get("title"),
-                "description": snippet.get("description"),
-            })
-
-    # Update cache
-    if new_etag:
-        etags_cache[channel_id] = new_etag
-
-    return {
-        "channelId": channel_id,
-        "etag_used": old_etag,
-        "etag_new": new_etag,
-        "videos": videos_info,
-        "unchanged": False,
-    }
+    print(f"[INFO] eTag cache updated at {ETAG_JSON_PATH}")
 
 ########################################
-# 3) YT-DLP AND PYTUBE LOGIC
+# 1) HELPER: SINGLE VS MULTI DETECTION
+########################################
+
+def is_single_video(url: str) -> bool:
+    """
+    Heuristic for single vs. multi:
+      - "watch?v=" or "youtu.be/" => single
+      - "/channel/", "/@", "list=", or "/playlist" => multi (channel/playlist)
+      - default => multi
+    """
+    if "watch?v=" in url or "youtu.be/" in url:
+        return True
+    # if handle or channel or playlist
+    if "/channel/" in url or "/@" in url or "list=" in url or "/playlist" in url:
+        return False
+    return False  # fallback
+
+########################################
+# 2) YOUTUBE DATA API + eTag
+########################################
+
+def fetch_channel_videos_api(channel_id: str, etags: Dict[str, str]) -> List[Dict]:
+    """
+    Use the YouTube Data API to fetch up to 10 or 50 items from channelId, respecting eTag.
+    We'll do a manual request via `requests` to handle If-None-Match easily.
+    Return a list of dict items with minimal keys.
+    """
+    if not YT_API_KEY:
+        print("[WARN] YT_API_KEY not set. Skipping Data API usage.")
+        return []
+
+    prev_etag = etags.get(channel_id)
+    url = (
+        "https://www.googleapis.com/youtube/v3/search"
+        f"?part=snippet&channelId={channel_id}&maxResults=10&order=date&key={YT_API_KEY}"
+    )
+    headers = {}
+    if prev_etag:
+        headers["If-None-Match"] = prev_etag
+    resp = requests.get(url, headers=headers)
+
+    if resp.status_code == 304:
+        print(f"[API] Channel {channel_id}: eTag unchanged => no new data.")
+        return []
+
+    if resp.status_code != 200:
+        print(f"[API] Error {resp.status_code} => {resp.text}")
+        return []
+
+    data = resp.json()
+    new_etag = resp.headers.get("ETag")
+    if new_etag:
+        etags[channel_id] = new_etag
+
+    items = data.get("items", [])
+    results = []
+    for it in items:
+        if it["id"]["kind"] == "youtube#video":
+            snippet = it.get("snippet", {})
+            results.append({
+                "videoId": it["id"]["videoId"],
+                "title": snippet.get("title"),
+                "description": snippet.get("description"),
+                "publishedAt": snippet.get("publishedAt"),
+                "channelId": snippet.get("channelId"),
+                "channelTitle": snippet.get("channelTitle"),
+                "source": "YouTubeDataAPI",
+            })
+    return results
+
+########################################
+# 3) YT-DLP AND PYTUBE
 ########################################
 
 def run_yt_dlp_metadata_only(url: str, output_dir: str):
     """
-    Use yt-dlp to fetch metadata. 
-    Creates .info.json in output_dir.
+    Use yt-dlp to fetch metadata without downloading video.
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    command = [
+    cmd = [
         "yt-dlp",
         "--skip-download",
         "--write-info-json",
@@ -193,143 +166,142 @@ def run_yt_dlp_metadata_only(url: str, output_dir: str):
         "--output", f"{output_dir}/%(title)s [%(id)s].%(ext)s",
         url
     ]
-    print(f"Running: {' '.join(command)}")
-    subprocess.run(command, check=False)
+    print(f"[yt-dlp] Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=False)
 
 def fetch_single_video_pytube(url: str) -> Dict[str, Any]:
     """
-    If Pytube is installed, fetch single video metadata quickly.
+    If pytube is installed, try to fetch single-video metadata quickly.
     """
     if not PYTUBE_AVAILABLE:
-        print("pytube not installed. Skipping single-video approach.")
+        print("[INFO] pytube not installed. Skipping single-video approach.")
         return {}
-    yt = YouTube(url)
-    data = {
-        "videoId": yt.video_id,
-        "title": yt.title,
-        "channel_url": yt.channel_url,
-        "channel_id": yt.channel_id,
-        "publish_date": str(yt.publish_date) if yt.publish_date else None,
-        "views": yt.views,
-        "description": yt.description[:200],
-    }
-    return data
-
+    try:
+        yt = YouTube(url)
+        return {
+            "videoId": yt.video_id,
+            "title": yt.title,
+            "channelId": yt.channel_id,
+            "channelTitle": getattr(yt, "channel_name", ""),  # channel_name is sometimes None
+            "publishedAt": str(yt.publish_date) if yt.publish_date else None,
+            "viewCount": yt.views,
+            "description": yt.description[:300],
+            "source": "pytube",
+        }
+    except Exception as ex:
+        print(f"[pytube] Error: {ex}")
+        return {}
 
 ########################################
-# 4) MAIN LOGIC
+# 4) MAIN
 ########################################
 
 def main():
-    parser = argparse.ArgumentParser(description="YouTube Combo (yt-dlp + pytube + Data API) with ETag caching.")
-    parser.add_argument("--input", default="data/input_links.txt", help="File with one YouTube link per line.")
-    parser.add_argument("--output-dir", default="data/output", help="Where to put .info.json from yt-dlp.")
-    parser.add_argument("--use-api", action="store_true", help="Use YouTube Data API for channels if possible.")
-    parser.add_argument("--etags-json", default="data/channel_etags.json", help="ETag cache file (for channel updates).")
-    parser.add_argument("--dump-json", default="", help="If set, path to combined JSON of processed data.")
+    parser = argparse.ArgumentParser(description="Combo YouTube data tool (API+etags + yt-dlp + pytube).")
+    parser.add_argument("--input-file", default="data/input_links.txt", help="File with YouTube links.")
+    parser.add_argument("--output-dir", default="data/output", help="Where to put yt-dlp .info.json.")
+    parser.add_argument("--dump-json", default="", help="If set, merges all found metadata to a single JSON.")
+    parser.add_argument("--dump-csv", default="", help="If set, merges all found metadata to CSV via parse_metadata.")
+    parser.add_argument("--use-api", action="store_true", help="Use Data API for channel links if channel ID is found.")
     args = parser.parse_args()
 
-    # Prepare output dir
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    # Prepare
+    input_file = Path(args.input_file)
+    if not input_file.exists():
+        print(f"[ERROR] Input file not found: {input_file}")
+        return
 
-    # Possibly load an API key
-    api_key = load_api_key()
+    links = [line.strip() for line in input_file.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    # Load ETag cache
-    etags_cache = load_etags_cache(args.etags_json)
+    # Load eTag cache
+    etag_map = load_etag_cache()
 
-    # Read input lines
-    with open(args.input, "r", encoding="utf-8") as f:
-        links = [line.strip() for line in f if line.strip()]
-
-    all_metadata = []  # we’ll store dict results here
+    all_items: List[Dict] = []
 
     for url in links:
         print(f"\nProcessing link: {url}")
 
         if is_single_video(url):
-            # Single => prefer pytube
-            data = fetch_single_video_pytube(url)
-            if data:
-                data["source"] = "pytube"
-                data["original_url"] = url
-                all_metadata.append(data)
+            # SINGLE => try pytube
+            meta = fetch_single_video_pytube(url)
+            if meta and meta.get("videoId"):
+                meta["originalUrl"] = url
+                all_items.append(meta)
             else:
-                # fallback: use yt-dlp
+                # fallback to yt-dlp
                 run_yt_dlp_metadata_only(url, args.output_dir)
-                # we can load the resulting .info.json if needed ...
             continue
 
-        # Else => channel/playlist => if channel and user wants to use YouTube Data API:
-        if args.use_api and api_key:
-            # We try to parse out the channelId from URL if possible
-            # e.g. https://www.youtube.com/channel/UCxxxxx => extract after /channel/
-            # or handle https://www.youtube.com/@someHandle => call an extra step to find channelId
-            # This is just a demonstration approach:
-            channel_id = None
+        # MULTI => channel/playlist => if user wants to use Data API and we can parse channel
+        if args.use_api and YT_API_KEY:
+            # Try to parse channel from /channel/<ID>
             match = re.search(r"/channel/([^/]+)", url)
+            channel_id = None
             if match:
                 channel_id = match.group(1)
             else:
-                # Possibly it's a handle => we won't do it thoroughly, just skip for now
+                # If using handle, we might do an extra step to convert handle->channelId. 
+                # But for brevity, skip or fallback to yt-dlp.
                 pass
 
             if channel_id:
-                resp = fetch_channel_videos_youtube_api(channel_id, api_key, etags_cache)
-                if resp["unchanged"]:
-                    print(f"Channel ID {channel_id} is unchanged (ETag). Skipping deeper fetch.")
+                new_videos = fetch_channel_videos_api(channel_id, etag_map)
+                if new_videos:
+                    all_items.extend(new_videos)
                 else:
-                    for vid in resp["videos"]:
-                        item = {
-                            "videoId": vid["videoId"],
-                            "title": vid["title"],
-                            "description": vid["description"],
-                            "channelId": channel_id,
-                            "source": "YouTubeDataAPI"
-                        }
-                        all_metadata.append(item)
+                    print(f"[INFO] No new or eTag unchanged for channel {channel_id}")
             else:
-                # fallback to yt-dlp if we can’t parse channelId
+                # fallback
                 run_yt_dlp_metadata_only(url, args.output_dir)
         else:
-            # fallback: just do yt-dlp
+            # fallback
             run_yt_dlp_metadata_only(url, args.output_dir)
 
-    # Save updated ETag cache
-    save_etags_cache(etags_cache, args.etags_json)
+    # Save updated eTag
+    save_etag_cache(etag_map)
 
-    # If --dump-json is set, gather any .info.json from disk plus the Data API / pytube data
-    # to produce a single consolidated JSON.
-    if args.dump_json:
-        # 1) load *.info.json from output_dir
-        combined_data = list(all_metadata)
-        info_files = list(Path(args.output_dir).glob("*.info.json"))
-        for fpath in info_files:
+    # If user wants a combined JSON, we also parse any .info.json from output_dir
+    if args.dump_json or args.dump_csv:
+        combined_data = list(all_items)
+
+        # Gather .info.json from yt-dlp
+        outdir = Path(args.output_dir)
+        json_files = list(outdir.glob("*.info.json"))
+        for jf in json_files:
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    metadata = json.load(f)
-                    combined_data.append({
-                        "videoId": metadata.get("id"),
-                        "title": metadata.get("title"),
-                        "channel_id": metadata.get("channel_id"),
-                        "view_count": metadata.get("view_count"),
-                        "like_count": metadata.get("like_count"),
-                        "duration": metadata.get("duration"),
-                        "webpage_url": metadata.get("webpage_url"),
-                        "description": (metadata.get("description") or "")[:200],
+                with open(jf, "r", encoding="utf-8") as f:
+                    md = json.load(f)
+                    # Minimal parse
+                    item = {
+                        "videoId": md.get("id"),
+                        "title": md.get("title"),
+                        "channelId": md.get("channel_id"),
+                        "channelTitle": md.get("channel"),
+                        "duration": md.get("duration"),
+                        "viewCount": md.get("view_count"),
+                        "likeCount": md.get("like_count"),
+                        "publishedAt": md.get("upload_date"),
+                        "description": (md.get("description") or "")[:200],
                         "source": "yt-dlp",
-                    })
+                    }
+                    combined_data.append(item)
             except:
                 pass
 
-        # Write final JSON
-        out_path = Path(args.dump_json)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(combined_data, f, indent=2, ensure_ascii=False)
-        print(f"Dumped consolidated results to {out_path}")
+        # Dump JSON
+        if args.dump_json:
+            Path(args.dump_json).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.dump_json, "w", encoding="utf-8") as f:
+                json.dump(combined_data, f, indent=2, ensure_ascii=False)
+            print(f"[INFO] Merged JSON saved: {args.dump_json}")
 
-    print("\nAll done. Exiting.")
+        # Dump CSV
+        if args.dump_csv:
+            from helpers.parse_metadata import parse_and_save_info_to_csv
+            Path(args.dump_csv).parent.mkdir(parents=True, exist_ok=True)
+            parse_and_save_info_to_csv(combined_data, args.dump_csv)
+
+    print("\nDone. Exiting.")
 
 
 if __name__ == "__main__":

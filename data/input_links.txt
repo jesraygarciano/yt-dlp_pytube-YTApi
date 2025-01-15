@@ -1,3 +1,11 @@
-https://www.youtube.com/channel/UCtdKiwN9vw961uho0lre4_A
-https://www.youtube.com/@muni_gurume
+# Single video:
 https://www.youtube.com/watch?v=5wQ9nAlO12E
+
+# Another single:
+https://youtu.be/dQw4w9WgXcQ
+
+# A channel link:
+https://www.youtube.com/channel/UCtdKiwN9vw961uho0lre4_A
+
+# A handle-based channel:
+https://www.youtube.com/@MrBeast
