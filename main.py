@@ -183,23 +183,30 @@ def fetch_channel_videos_api(channel_id: str, etags: Dict[str, str]) -> List[Dic
 ########################
 def run_yt_dlp_metadata_only(url: str, output_dir: str):
     """
-    Calls yt-dlp as a subprocess:
-      python -m yt_dlp --skip-download ...
-    Includes proxy if available.
+    Calls yt-dlp as a subprocess with optional cookies and random proxy.
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+
     cmd = [
         sys.executable,
         "-m", "yt_dlp",
         "--skip-download",
         "--write-info-json",
         "--ignore-errors",
-        "--output", f"{output_dir}/%(title)s [%(id)s].%(ext)s",
+        "--output", f"{output_dir}/%(title)s [%(id)s].%(ext)s"
     ]
-    # If we have a random proxy, pass `--proxy=<proxy>`
+
+    # Use a random proxy if available
     proxy = get_random_proxy()
     if proxy:
         cmd.append(f"--proxy={proxy}")
+
+    # If you have a cookies file
+    cookies_txt = Path("data/yt_cookies.txt")
+    if cookies_txt.exists():
+        cmd += ["--cookies", str(cookies_txt)]
+    # OR cookies-from-browser
+    # cmd += ["--cookies-from-browser", "chrome"]
 
     cmd.append(url)
     print(f"[yt-dlp] Running: {' '.join(cmd)}")
