@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Data
+data/output/*.info.json
+data/output/*.mp4
+data/output/*.mkv
+data/output/*.webm
+
+# Virtual Environment
+venv/
+.env
+
+# OS / Editor
+.DS_Store
