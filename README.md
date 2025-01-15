@@ -20,13 +20,16 @@ $ pip install -r requirements.txt
 
 # 2) Put your .env with YOUTUBE_API_KEY and PROXIES
 
+```bash
 NODE_ENV=
 YOUTUBE_API_KEY=
 PROXIES=
+```
 
 # 3) Adjust data/input_links.json to your desired list of URLs
 
 E.G:
+```sh
 {
     "urls": [
       "https://www.youtube.com/@muni_gurume",
@@ -34,6 +37,7 @@ E.G:
       "https://www.youtube.com/@tamo__tyan"
     ]
 }
+```
 
 # 4) Run main.py
 ```bash
@@ -43,9 +47,9 @@ python main.py \
   --dump-csv data/output/merged.csv
 ```
 
-# That will:
-#  - Use YouTube Data API for channel links,
-#  - fallback to yt-dlp or single-video pytube,
-#  - rotate proxies for each request,
-#  - produce data/output/*.info.json for each channel or video,
-#  - create data/output/merged.json + merged.csv with all info.
+## That will:
+###  - Use YouTube Data API for channel links,
+###  - fallback to yt-dlp or single-video pytube,
+###  - rotate proxies for each request,
+###  - produce data/output/*.info.json for each channel or video,
+###  - create data/output/merged.json + merged.csv with all info.
